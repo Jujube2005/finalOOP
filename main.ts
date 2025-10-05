@@ -1,241 +1,343 @@
-import { Database } from "./Database";
-import { User } from "./User";
-import { Member } from "./Member";
-import { Leader } from "./Leader";
-import { Mission } from "./Mission";
-import { MemberStatus } from "./enum";
-//@ts-ignore
-import * as readline from "readline";
+import sqlite3 from "sqlite3";
+import readline from "readline";
 
-const db = new Database();
+const db = new sqlite3.Database("./mission_app.db");
 
 const rl = readline.createInterface({
-  //@ts-ignore
   input: process.stdin,
-  //@ts-ignore
   output: process.stdout,
 });
 
-function askQuestion(query: string): Promise<string> {
-  return new Promise((resolve) => rl.question(query, resolve));
+function ask(question: string): Promise<string> {
+  return new Promise((resolve) => rl.question(question, resolve));
 }
 
-// ----- User Management -----
-async function createUser(): Promise<User> {
-  const id = parseInt(await askQuestion("Enter your ID: "));
-  if (db.fetchUser(id)) {
-    console.log("User ID already exists.");
-    return await createUser();
-  }
-  const name = await askQuestion("Enter your Name: ");
-  const user = new User(id, name);
-  db.saveUser(user);
-  console.log(`User created: ${user.name} (ID: ${user.id})`);
-  return user;
+// --------------------
+// User Functions
+// --------------------
+async function createUser() {
+  const name = await ask("Enter user name: ");
+
+  return new Promise<void>((resolve, reject) => {
+    // เช็คว่าชื่อซ้ำไหม
+    db.get("SELECT * FROM user WHERE name = ?", [name], (err, row) => {
+      if (err) return reject(err);
+      if (row) {
+        console.log("User already exists!");
+        return resolve();
+      }
+      db.run(
+        "INSERT INTO user (name) VALUES (?)",
+        [name],
+        function (err) {
+          if (err) return reject(err);
+          console.log(`User created with ID: ${this.lastID}`);
+          resolve();
+        }
+      );
+    });
+  });
 }
 
-async function selectUser(): Promise<User | null> {
-  const users = db.getUsers();
-  if (users.length === 0) {
-    console.log("No users found. Please create a user first.");
-    return null;
-  }
-  console.log("Users:");
-  users.forEach((u) => console.log(`ID: ${u.id}, Name: ${u.name}`));
-  const id = parseInt(await askQuestion("Enter your User ID: "));
-  const user = db.fetchUser(id);
-  if (!user) console.log("User not found.");
-  return user;
+async function loginUser(): Promise<{ id: number; name: string } | null> {
+  const name = await ask("Enter your username: ");
+  return new Promise((resolve, reject) => {
+    db.get("SELECT * FROM user WHERE name = ?", [name], (err, row: any) => {   // บอกว่า row เป็น any
+    if (err) return reject(err);
+    if (!row) {
+      console.log("User not found!");
+      return resolve(null);
+    }
+    console.log(`Logged in as ${row.name} (ID: ${row.user_id})`);
+    resolve({ id: row.user_id, name: row.name });
+  });
+  });
 }
 
-// ----- Mission Functions -----
-async function createMission(user: User) {
-  // ตรวจสอบว่า user เป็น leader ของ mission ไหนแล้ว
-  if (db.fetchLeader(user.id)) {
-    console.log("You are already a leader of a mission.");
-    return;
-  }
-
-  const missionId = parseInt(await askQuestion("Enter mission ID: "));
-  if (db.fetchMission(missionId)) {
-    console.log("Mission ID already exists.");
-    return;
-  }
-
-  const missionName = await askQuestion("Enter mission name: ");
-  const leader = new Leader(user.id, user.name);
-  db.saveLeader(leader);
-
-  const mission = new Mission(missionId, missionName, leader);
-  db.saveMission(mission);
-
-  console.log(`Mission "${missionName}" created (Leader: ${leader.name})`);
+// --------------------
+// Mission Functions
+// --------------------
+async function createMission(userId: number) {
+  const name = await ask("Enter mission name: ");
+  const status = "not_started";
+  return new Promise<void>((resolve, reject) => {
+    db.run(
+      "INSERT INTO mission (name, status, mission_leader_id) VALUES (?, ?, ?)",
+      [name, status, userId],
+      function (err) {
+        if (err) return reject(err);
+        console.log(`Mission "${name}" created with ID: ${this.lastID}`);
+        resolve();
+      }
+    );
+  });
 }
 
-async function joinMission(user: User) {
-  const missions = db.getMissions();
-  if (missions.length === 0) {
-    console.log("No missions available.");
-    return;
-  }
+async function joinMission(userId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT * FROM mission WHERE mission_id NOT IN 
+       (SELECT mission_id FROM mission_member WHERE member_id = ?)`,
+      [userId],
+      async (err, missions) => {
+        if (err) {
+          console.error(err.message);
+          return reject(err);
+        }
 
-  console.log("Available missions:");
-  missions.forEach((m) =>
-    console.log(`ID: ${m.id}, Name: ${m.name}, Leader: ${m.leader.name}, Members: ${m.getMembers().length}`)
+        if (missions.length === 0) {
+          console.log("No available missions to join!");
+          return resolve();
+        }
+
+        console.log("\nAvailable Missions:");
+        missions.forEach((m: any) => console.log(`${m.mission_id}: ${m.name}`));
+
+        const missionId = parseInt(await ask("Enter mission ID to join: "));
+
+        await new Promise<void>((res, rej) => {
+          db.run(
+            "INSERT OR IGNORE INTO mission_member (mission_id, member_id) VALUES (?, ?)",
+            [missionId, userId],
+            function (err) {
+              if (err) {
+                console.error(err.message);
+                rej(err);
+              } else {
+                console.log("✅ You joined the mission!");
+                res();
+              }
+            }
+          );
+        });
+        resolve();
+      }
+    );
+  });
+}
+
+
+
+async function startMission(userId: number) {
+  try {
+    const missions = await new Promise<any[]>((resolve, reject) => {
+      db.all(
+        "SELECT * FROM mission WHERE mission_leader_id = ?",
+        [userId],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows);
+        }
+      );
+    });
+
+    if (missions.length === 0) {
+      console.log("No missions found for this leader!");
+      return;
+    }
+
+    console.log("Your Missions:");
+    missions.forEach((m) => console.log(`${m.mission_id}: ${m.name} [${m.status}]`));
+
+    const missionId = parseInt(await ask("Enter mission ID to start: "));
+
+    await new Promise<void>((resolve, reject) => {
+      db.run(
+        "UPDATE mission SET status = 'in_progress' WHERE mission_id = ? AND mission_leader_id = ?",
+        [missionId, userId],
+        function (err) {
+          if (err) return reject(err);
+          if (this.changes === 0) console.log("You can't start this mission!");
+          else console.log("🚀 Mission started!");
+          resolve();
+        }
+      );
+    });
+  } catch (err) {
+    console.error("Error starting mission:", err);
+  }
+}
+
+
+async function endMission(userId: number): Promise<void> {
+  try {
+    // ดึง mission ของ leader ที่กำลัง in_progress
+    const missions = await new Promise<any[]>((resolve, reject) => {
+      db.all(
+        "SELECT * FROM mission WHERE mission_leader_id = ? AND status = 'in_progress'",
+        [userId],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows || []);
+        }
+      );
+    });
+
+    if (missions.length === 0) {
+      console.log("No missions in progress for you to end.");
+      return;
+    }
+
+    console.log("Your missions in progress:");
+    missions.forEach((m) =>
+      console.log(`${m.mission_id}: ${m.name} [${m.status}]`)
+    );
+
+    const missionIdInput = await ask("Enter mission ID to end: ");
+    const missionId = parseInt(missionIdInput.trim(), 10);
+    if (Number.isNaN(missionId)) {
+      console.log("Invalid mission ID.");
+      return;
+    }
+
+    // ตรวจสอบว่า mission ที่เลือกเป็นของ leader จริง ๆ
+    const sel = missions.find((m) => m.mission_id === missionId);
+    if (!sel) {
+      console.log("Mission not found or not allowed to end.");
+      return;
+    }
+
+    // อัปเดต status เป็น 'finished' ใน DB
+    await new Promise<void>((resolve, reject) => {
+      db.run(
+        "UPDATE mission SET status = 'finished' WHERE mission_id = ? AND mission_leader_id = ?",
+        [missionId, userId],
+        function (err) {
+          if (err) return reject(err);
+          console.log(`✅ Mission ${missionId} ended (status = finished)`);
+          resolve();
+        }
+      );
+    });
+
+    // แสดงสมาชิกใน mission
+    const members = await new Promise<any[]>((resolve, reject) => {
+      db.all(
+        "SELECT u.name FROM user u JOIN mission_member mm ON u.user_id = mm.member_id WHERE mm.mission_id = ?",
+        [missionId],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows || []);
+        }
+      );
+    });
+
+    console.log("Members in this mission:");
+    if (members.length === 0) {
+      console.log("- (no members)");
+    } else {
+      members.forEach((r) => console.log(`- ${r.name}`));
+    }
+
+    // สุ่มผลชนะ/แพ้ แสดงผลบน console
+    const result = Math.random() < 0.5 ? "won" : "lost";
+    console.log(`🎉 Mission result: ${result.toUpperCase()}`);
+
+  } catch (err) {
+    console.error("Error ending mission:", err);
+  }
+}
+
+
+async function listAllMissions() {
+  db.all("SELECT * FROM mission", [], (err, rows) => {
+    if (err) return console.error(err.message);
+    if (rows.length === 0) {
+      console.log("No missions found.");
+      return;
+    }
+    rows.forEach((m: any) => console.log(`\n${m.mission_id}: ${m.name}, Status: ${m.status}`));
+  });
+}
+
+async function deleteMission(userId: number) {
+  db.all(
+    "SELECT * FROM mission WHERE mission_leader_id = ?",
+    [userId],
+    async (err, missions) => {
+      if (err) return console.error(err.message);
+      if (missions.length === 0) {
+        console.log("No missions to delete!");
+        return;
+      }
+      console.log("Your missions:");
+      missions.forEach((m: any) => console.log(`${m.mission_id}: ${m.name}`));
+      const missionId = parseInt(await ask("Enter mission ID to delete: "));
+      db.run("DELETE FROM mission WHERE id = ?", [missionId], function (err) {
+        if (err) console.error(err.message);
+        else console.log("Mission deleted!");
+      });
+    }
   );
-
-  const missionId = parseInt(await askQuestion("Enter mission ID to join: "));
-  const mission = db.fetchMission(missionId);
-
-  if (!mission) {
-    console.log("Mission not found.");
-    return;
-  }
-
-  if (mission.leader.id === user.id) {
-    console.log("You are the leader of this mission, cannot join as member.");
-    return;
-  }
-
-  if (mission.getMembers().some(m => m.id === user.id)) {
-    console.log("You already joined this mission.");
-    return;
-  }
-
-  const member = new Member(user.id, user.name, MemberStatus.Joined);
-  db.saveMember(member);
-  mission.addMember(member);
-
-  console.log(`${member.name} joined mission "${mission.name}"`);
 }
 
-// ----- Mission Menu -----
-async function missionMenu(user: User) {
-  let running = true;
-  while (running) {
+// --------------------
+// Main Menu
+// --------------------
+async function missionMenu(user: { id: number; name: string }) {
+  while (true) {
     console.log("\n=== MISSION MENU ===");
-    console.log("1. Create Mission (Leader)");
-    console.log("2. Join Mission (Member)");
-    console.log("3. Start Mission (Leader Only)");
-    console.log("4. End Mission (Leader Only)");
-    console.log("5. Show Mission Details");
-    console.log("6. List All Missions");
-    console.log("7. Delete Mission (Leader Only)");
-    console.log("8. Back to Main Menu");
-
-    const choice = await askQuestion("Choose an option: ");
+    console.log("1. Create Mission");
+    console.log("2. Join Mission");
+    console.log("3. Start Mission");
+    console.log("4. End Mission");
+    console.log("5. List All Missions");
+    console.log("6. Delete Mission");
+    console.log("7. Back to Main Menu");
+    const choice = await ask("Select option: ");
 
     switch (choice) {
       case "1":
-        await createMission(user);
+        await createMission(user.id);
         break;
-
       case "2":
-        await joinMission(user);
+        await joinMission(user.id);
         break;
-
       case "3":
-        const startMissions = db.getMissions().filter(m => m.leader.id === user.id);
-        if (startMissions.length === 0) { console.log("You have no missions to start."); break; }
-        startMissions.forEach(m => console.log(`ID: ${m.id}, Name: ${m.name}, Status: ${m.status}`));
-        const startId = parseInt(await askQuestion("Enter mission ID to start: "));
-        const startMission = db.fetchMission(startId);
-        if (startMission?.leader.id === user.id) {
-          startMission.startMission();
-          console.log(`Mission "${startMission.name}" started.`);
-        } else console.log("Invalid mission.");
+        await startMission(user.id);
         break;
-
       case "4":
-        const endMissions = db.getMissions().filter(m => m.leader.id === user.id);
-        if (endMissions.length === 0) { console.log("You have no missions to end."); break; }
-        endMissions.forEach(m => console.log(`ID: ${m.id}, Name: ${m.name}, Status: ${m.status}`));
-        const endId = parseInt(await askQuestion("Enter mission ID to end: "));
-        const endMission = db.fetchMission(endId);
-        if (endMission?.leader.id === user.id) {
-          endMission.finishMission();
-          console.log(`Mission "${endMission.name}" ended.`);
-        } else console.log("Invalid mission.");
+        await endMission(user.id);
         break;
-
       case "5":
-        const detailId = parseInt(await askQuestion("Enter mission ID: "));
-        const detailMission = db.fetchMission(detailId);
-        if (!detailMission) { console.log("Mission not found."); break; }
-        console.log(`\nMission "${detailMission.name}" (ID: ${detailMission.id}, Status: ${detailMission.status})`);
-        console.log(`Leader: ${detailMission.leader.name}`);
-        console.log("Members:");
-        console.log(`- ${detailMission.leader.name} (Leader)`);
-        detailMission.getMembers().forEach(m => console.log(`- ${m.name} (Member)`));
+        await listAllMissions();
         break;
-
       case "6":
-        const allMissions = db.getMissions();
-        if (allMissions.length === 0) console.log("No missions available.");
-        else allMissions.forEach(m =>
-          console.log(`ID: ${m.id}, Name: ${m.name}, Status: ${m.status}, Leader: ${m.leader.name}, Members: ${m.getMembers().length}`)
-        );
+        await deleteMission(user.id);
         break;
-
       case "7":
-        const delMissions = db.getMissions().filter(m => m.leader.id === user.id);
-        if (delMissions.length === 0) { console.log("You have no missions to delete."); break; }
-        delMissions.forEach(m => console.log(`ID: ${m.id}, Name: ${m.name}`));
-        const delId = parseInt(await askQuestion("Enter mission ID to delete: "));
-        const delMission = db.fetchMission(delId);
-        if (delMission?.leader.id === user.id) {
-          db.deleteMission(delId);
-          console.log(`Mission "${delMission.name}" deleted.`);
-        } else console.log("Invalid mission.");
-        break;
-
-      case "8":
-        running = false;
-        break;
-
+        return;
       default:
-        console.log("Invalid option.");
+        console.log("Invalid option!");
     }
   }
 }
 
-// ----- Main Menu -----
-async function main() {
-  console.log("=== Welcome to Mission Management System ===");
-
-  let currentUser: User | null = null;
-  let running = true;
-
-  while (running) {
+async function mainMenu() {
+  while (true) {
     console.log("\n=== MAIN MENU ===");
     console.log("1. Create User");
     console.log("2. Login User");
-    console.log("3. Mission Menu");
-    console.log("4. Exit");
-
-    const choice = await askQuestion("Choose an option: ");
+    console.log("3. Exit");
+    const choice = await ask("Select option: ");
 
     switch (choice) {
       case "1":
-        currentUser = await createUser();
+        await createUser();
         break;
       case "2":
-        const user = await selectUser();
-        if (user) currentUser = user;
+        const user = await loginUser();
+        if (user) await missionMenu(user);
         break;
       case "3":
-        if (!currentUser) { console.log("Please login first."); break; }
-        await missionMenu(currentUser);
-        break;
-      case "4":
         console.log("Goodbye!");
-        running = false;
         rl.close();
-        break;
+        db.close();
+        return;
       default:
-        console.log("Invalid option.");
+        console.log("Invalid option!");
     }
   }
 }
 
-main().catch(err => { console.error(err); rl.close(); });
+mainMenu();
