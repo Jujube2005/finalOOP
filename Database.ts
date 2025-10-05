@@ -1,9 +1,9 @@
-import { Mission } from "./Mission";
-import { Member } from "./Member";
-import { Leader } from "./Leader";
-import { User } from "./User";
+import { Mission } from "./Mission.js";
+import { Member } from "./Member.js";
+import { Leader } from "./Leader.js";
+import { User } from "./User.js";
 
-export class Database {
+export class MissionDB {
   private missions: Mission[] = [];
   private members: Member[] = [];
   private leaders: Leader[] = [];
